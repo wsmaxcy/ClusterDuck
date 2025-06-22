@@ -1,7 +1,7 @@
 # ClusterDuck 🐥  
 *A Modern GUI for Managing MySQL InnoDB Clusters*
 
-![ClusterDuck Logo](img/icon.png)
+![ClusterDuck Logo](img/duck.webp)
 
 **ClusterDuck** is a modern, dark-themed GUI built with Python and `customtkinter` to manage and monitor [MySQL InnoDB Clusters](https://dev.mysql.com/doc/mysql-shell/8.0/en/). Featuring real-time LED indicators, a tabbed multi-node interface, safe command presets, and portable `.exe` support — it’s the friendliest duck in your database pond.
 
@@ -94,21 +94,37 @@ ClusterDuck includes a wide range of prebuilt administrative and diagnostic comm
 ## 📁 Project Structure
 
 InnoDB-Manager/
+
 ├── img/
+
 │ ├── icon.png
+
 │ ├── icon.ico
+
 │ ├── greenLED.png
+
 │ ├── yellowLED.png
+
 │ ├── redLED.png
+
 │ ├── blueLED.png
+
 │ └── screenshots/
+
 │ ├── login.png
+
 │ ├── overview.png
+
 │ └── node-detail.png
+
 ├── tabbed.py
+
 ├── README.md
+
 ├── LICENSE
+
 └── dist/
+
 └── ClusterDuck.exe
 
 
@@ -152,3 +168,15 @@ Designed/tested against MySQL InnoDB Cluster 8.x with GTID enabled
 
 GUI assumes a fully functioning cluster topology with reachable nodes
 
+---
+
+## 📄 License
+MIT License
+
+---
+
+## 📬 Feedback & Contributions
+Spotted a bug? Have a feature request?
+
+Open an issue or contribute at:
+🔗 github.com/wsmaxcy/ClusterDuck
