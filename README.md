@@ -87,7 +87,7 @@ ClusterDuck includes a wide range of prebuilt administrative and diagnostic comm
 
 | Login Dialog | Cluster Overview | Node Detail View |
 |--------------|------------------|------------------|
-| ![Login](img/screenshots/login.png) | ![Overview](img/screenshots/overview.png) | ![Node View](img/screenshots/node-detail.png) |
+| ![Login](img/login.png) | ![Overview](img/overview.png) | ![Node View](img/node-detail.png) |
 
 ---
 
