@@ -1,7 +1,7 @@
 # ClusterDuck 🐥  
 *A Modern GUI for Managing MySQL InnoDB Clusters*
 
-![ClusterDuck Logo](img/duck.webp)
+![ClusterDuck Logo](img/overview2.png)
 
 **ClusterDuck** is a modern, dark-themed GUI built with Python and `customtkinter` to manage and monitor [MySQL InnoDB Clusters](https://dev.mysql.com/doc/mysql-shell/8.0/en/). Featuring real-time LED indicators, a tabbed multi-node interface, safe command presets, and portable `.exe` support — it’s the friendliest duck in your database pond.
 

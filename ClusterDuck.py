@@ -53,6 +53,26 @@ def resource_path(relative_path: str) -> Path:
         return Path(sys._MEIPASS) / relative_path
     return Path(__file__).resolve().parent / relative_path
 
+def center_window(win, width: int | None = None, height: int | None = None):
+    """
+    Re-position *win* so that it appears centred on the primary display.
+
+    If *width* / *height* are not provided, the function asks Tk for the
+    window’s current size (after an `update_idletasks()`).
+    """
+    win.update_idletasks()                           # be sure geometry is known
+
+    if width  is None: width  = win.winfo_width()
+    if height is None: height = win.winfo_height()
+
+    screen_w  = win.winfo_screenwidth()
+    screen_h  = win.winfo_screenheight()
+    x = (screen_w  // 2) - (width  // 2)
+    y = (screen_h // 2) - (height // 2)
+
+    win.geometry(f"{width}x{height}+{x}+{y}")
+
+
 IMG = resource_path("img")
 
 class LEDManager:
@@ -105,6 +125,33 @@ class LEDManager:
             except Exception as e:
                 print(f"[LEDManager] Error setting static LED: {e}")
 
+        # ------------------------------------------------------------------
+    def blink_between(self, widget: ctk.CTkLabel,
+                      file_a: str, file_b: str,
+                      interval: int = 500):
+        """
+        Blink by toggling between *file_a* and *file_b* instead of
+        the old “on / blank” style.
+        """
+        self.stop(widget)                       # cancel any prior blink
+
+        img_a = self._load(file_a)
+        img_b = self._load(file_b)
+        self._blink_state[widget] = False
+
+        def _step():
+            if not widget.winfo_exists():       # widget was destroyed
+                return
+            self._blink_state[widget] = not self._blink_state[widget]
+            img = img_a if self._blink_state[widget] else img_b
+            widget.configure(image=img)
+            widget.image = img                  # keep reference
+            job_id = self.root.after(interval, _step)
+            self._blink_jobs[widget] = job_id
+
+        _step()
+
+
 
     def stop(self, widget: ctk.CTkLabel):
         job_id = self._blink_jobs.pop(widget, None)
@@ -118,8 +165,12 @@ class LEDManager:
 ###############################################################################
 
 def run_mysqlsh(uri: str, js: str) -> str:
+    """
+    Run mysqlsh in --batch mode.  If the shell exits with non-zero status,
+    raise RuntimeError so callers can handle it cleanly.
+    """
     env = os.environ.copy()
-    env["MYSQLSH_WARN_PASSWORD"] = "0"  # Suppress warning if supported
+    env["MYSQLSH_WARN_PASSWORD"] = "0"           # hide CLI-password warning
 
     result = subprocess.run(
         ["mysqlsh", "--uri", uri, "--js", "-e", js],
@@ -129,18 +180,20 @@ def run_mysqlsh(uri: str, js: str) -> str:
         creationflags=subprocess.CREATE_NO_WINDOW
     )
 
-    # Filter out the insecure password warning
+    # Drop only the "Using a password ..." warning
     stderr_lines = [
-        line for line in result.stderr.strip().splitlines()
-        if "Using a password on the command line interface can be insecure" not in line
+        ln for ln in result.stderr.strip().splitlines()
+        if "can be insecure" not in ln
     ]
-    stderr_clean = "\n".join(stderr_lines)
+    stderr_clean = "\n".join(stderr_lines).strip()
 
-    # Always ensure a newline between stdout and stderr (if any)
-    if stderr_clean:
-        return f"{result.stdout.strip()}\n{stderr_clean}".strip()
-    else:
-        return result.stdout.strip()
+    if result.returncode != 0:
+        # Any mysqlsh failure bubbles up as an exception
+        raise RuntimeError(stderr_clean or "mysqlsh exited with code "
+                         f"{result.returncode}")
+
+    return result.stdout.strip()
+
 
 
 def get_cluster_status(uri: str) -> str:
@@ -172,6 +225,7 @@ class LoginDialog(ctk.CTkToplevel):
         self.geometry("200x270")
         self.grab_set()
         self.resizable(False, False)
+        center_window(self, 200, 270)
 
          # 🌟 Add this block to set the icon
         icon_path = IMG / "icon.ico"
@@ -231,12 +285,14 @@ COLOR_MAP = {
 
 
 CLUSTER_COMMANDS: List[Dict[str, str]] = [
-    # === JS Commands (Safe) ===
+    # ─────────────────────────  JS / AdminAPI  ──────────────────────────
+    # ―― Safe helpers ――
     {
         "title": "Check Cluster Status",
-        "template": "dba.getCluster().status({ extended: true })",
+        "template": "dba.getCluster().status({extended:true})",
         "mode": "JS",
-        "risk": "safe"
+        "risk": "safe",
+        "hint": "Full topology, lag, errors, etc."
     },
     {
         "title": "List Cluster Instances",
@@ -269,47 +325,48 @@ CLUSTER_COMMANDS: List[Dict[str, str]] = [
         "risk": "safe"
     },
 
-    # === JS Commands (Dangerous) ===
+    # ―― Higher-risk cluster actions ――
     {
         "title": "Set Primary Instance",
         "template": "dba.getCluster().setPrimaryInstance('<node>')",
         "mode": "JS",
         "risk": "danger",
-        "danger": "May cause temporary failover or reconnection delays."
+        "danger": "Triggers failover; brief downtime for writers."
     },
     {
-        "title": "Force Rejoin",
-        "template": "dba.getCluster().rejoinInstance('<node>', {force: true})",
+        "title": "Force Rejoin (Clone)",
+        "template": "dba.getCluster().rejoinInstance('<node>',{force:true})",
         "mode": "JS",
         "risk": "danger",
-        "danger": "Use only if a normal rejoin fails. May lose transactions."
+        "danger": "May discard transactions on the target."
     },
     {
-        "title": "Reboot from Outage",
+        "title": "Reboot From Complete Outage",
         "template": "dba.rebootClusterFromCompleteOutage()",
         "mode": "JS",
         "risk": "danger",
-        "danger": "Only use when the entire cluster has gone down."
+        "danger": "Last-resort operation when every node is offline."
     },
     {
         "title": "Add Instance (Clone)",
-        "template": "dba.getCluster().addInstance('<user>@<node>', {recoveryMethod: 'clone'})",
+        "template": "dba.getCluster().addInstance('<user>@<node>',{recoveryMethod:'clone'})",
         "mode": "JS",
         "risk": "danger",
-        "danger": "Ensure the node is empty and properly prepared."
+        "danger": "Target must be empty; will wipe existing data."
     },
     {
         "title": "Remove Instance",
         "template": "dba.getCluster().removeInstance('<user>@<node>')",
         "mode": "JS",
         "risk": "danger",
-        "danger": "Removes instance permanently from cluster."
+        "danger": "Permanent; instance leaves the replication group."
     },
 
-    # === SQL Commands (Safe) ===
+    # ─────────────────────────────  SQL  ────────────────────────────────
+    # ―― Safe diagnostics ――
     {
-        "title": "Show Hostname and Port",
-        "template": "SELECT @@hostname, @@port;",
+        "title": "Show Hostname / Port",
+        "template": "SELECT @@hostname AS Host, @@port AS Port;",
         "mode": "SQL",
         "risk": "safe"
     },
@@ -318,6 +375,20 @@ CLUSTER_COMMANDS: List[Dict[str, str]] = [
         "template": "SELECT * FROM performance_schema.replication_group_members;",
         "mode": "SQL",
         "risk": "safe"
+    },
+    {
+        "title": "Show Processlist",
+        "template": "SHOW FULL PROCESSLIST;",
+        "mode": "SQL",
+        "risk": "safe",
+        "hint": "Great for spotting long-running or locked queries."
+    },
+    {
+        "title": "Show Engine InnoDB Status",
+        "template": "SHOW ENGINE INNODB STATUS\\G",
+        "mode": "SQL",
+        "risk": "safe",
+        "hint": "Deadlocks, semaphores, purge lag, etc."
     },
     {
         "title": "Show Replication Applier Status",
@@ -338,7 +409,7 @@ CLUSTER_COMMANDS: List[Dict[str, str]] = [
         "risk": "safe"
     },
     {
-        "title": "Check Binary Log Format",
+        "title": "Check Binlog Format",
         "template": "SELECT @@global.binlog_format;",
         "mode": "SQL",
         "risk": "safe"
@@ -350,42 +421,47 @@ CLUSTER_COMMANDS: List[Dict[str, str]] = [
         "risk": "safe"
     },
     {
-        "title": "MySQL Version",
+        "title": "Server Version",
         "template": "SELECT VERSION();",
         "mode": "SQL",
         "risk": "safe"
     },
 
-    # === SQL Commands (Dangerous) ===
+    # ―― Dangerous / writes state ――
     {
         "title": "Set Read-Only Mode",
-        "template": "SET GLOBAL super_read_only = ON; SET GLOBAL read_only = ON;",
+        "template": "SET GLOBAL super_read_only=ON; SET GLOBAL read_only=ON;",
         "mode": "SQL",
         "risk": "danger",
-        "danger": "Sets entire instance to read-only mode."
+        "danger": "Stops all writes on this node."
     },
     {
         "title": "Set Read-Write Mode",
-        "template": "SET GLOBAL super_read_only = OFF; SET GLOBAL read_only = OFF;",
+        "template": "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF;",
         "mode": "SQL",
-        "risk": "danger",
-        "danger": "Disables read-only safeguards on the instance."
+        "risk": "danger"
     },
     {
-        "title": "Start Group Replication",
+        "title": "START Group Replication",
         "template": "START GROUP_REPLICATION;",
         "mode": "SQL",
-        "risk": "danger",
-        "danger": "Starts replication processes — ensure config is valid."
+        "risk": "danger"
     },
     {
-        "title": "Stop Group Replication",
+        "title": "STOP Group Replication",
         "template": "STOP GROUP_REPLICATION;",
         "mode": "SQL",
+        "risk": "danger"
+    },
+    {
+        "title": "RESET MASTER (purge binary logs)",
+        "template": "RESET MASTER;",
+        "mode": "SQL",
         "risk": "danger",
-        "danger": "Disrupts replication on the node."
+        "danger": "Deletes *all* binlogs; replicas must resync with clone or backup."
     },
 ]
+
 
 
 
@@ -393,11 +469,12 @@ CLUSTER_COMMANDS: List[Dict[str, str]] = [
 class ClusterGUI(ctk.CTkFrame):
     def __init__(self, master, mysql_uri: str, creds: Dict[str, str], node_scope: str):
         super().__init__(master)
-        self.master = master  # needed for after(), etc.
+        self.master = master
+        self.mysql_uri = mysql_uri
+        self.creds = creds
+
         self.node_var = ctk.StringVar()
         self.node_leds: Dict[str, ctk.CTkLabel] = {}
-        self.mysql_uri = mysql_uri
-        self.creds     = creds
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
@@ -406,50 +483,58 @@ class ClusterGUI(ctk.CTkFrame):
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.output_q: queue.Queue[str] = queue.Queue()
 
-        # --- top summary line -----------------------------
-        self.summary_lbl = ctk.CTkLabel(self, text="Loading…", font=("Segoe UI", 14, "bold"))
-        self.summary_lbl.place(x=10, y=10)
+        # ─── grid layout ────────────────────────────────────────────────
+        self.grid_rowconfigure(0, weight=0)   # summary bar
+        self.grid_rowconfigure(1, weight=0)   # node / command panels
+        self.grid_rowconfigure(2, weight=1)   # terminal (expands)
+        self.grid_rowconfigure(3, weight=0)   # input bar
+        self.grid_columnconfigure(0, weight=3)
+        self.grid_columnconfigure(1, weight=1)
 
-        self.status_led_lbl = ctk.CTkLabel(self, text="")
-        self.status_led_lbl.place(x=960, y=10)  # right-aligned
+        # ─── summary strip ──────────────────────────────────────────────
+        top_bar = ctk.CTkFrame(self, fg_color="transparent")
+        top_bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+        top_bar.grid_columnconfigure(0, weight=1)
 
-        self.refresh_btn = ctk.CTkButton(self, text="Refresh", command=self.refresh_cluster)
-        self.refresh_btn.place(x=840, y=10)
+        self.summary_lbl = ctk.CTkLabel(top_bar, text="Loading…", font=("Segoe UI", 14, "bold"))
+        self.summary_lbl.grid(row=0, column=0, sticky="w")
 
-        # --- node radio list ------------------------------
+        self.refresh_btn = ctk.CTkButton(top_bar, text="Refresh", command=self.refresh_cluster)
+        self.refresh_btn.grid(row=0, column=1, sticky="e", padx=(0, 10))
+
+        self.status_led_lbl = ctk.CTkLabel(top_bar, text="")
+        self.status_led_lbl.grid(row=0, column=2, sticky="e")
+
+        # ─── node list panel ────────────────────────────────────────────
         self.node_frame = ctk.CTkScrollableFrame(self, width=600, height=265)
-        self.node_frame.place(x=10, y=60)
-        self.node_var: ctk.StringVar = ctk.StringVar()
+        self.node_frame.grid(row=1, column=0, sticky="ew", padx=(10, 5), pady=5)
+
         self.node_var.trace_add("write", lambda *args: self._update_selected_node_led())
 
-
-        # --- command buttons ------------------------------
+        # ─── command panel ──────────────────────────────────────────────
         self.cmd_grp_scroll = ctk.CTkScrollableFrame(self, width=310, height=265)
-        self.cmd_grp_scroll.place(x=650, y=60)
+        self.cmd_grp_scroll.grid(row=1, column=1, sticky="ew", padx=(5, 10), pady=5)
 
-        ctk.CTkLabel(self.cmd_grp_scroll, text="Cluster Commands", font=("Segoe UI", 14, "bold")).pack(pady=(0, 0))
+        ctk.CTkLabel(self.cmd_grp_scroll, text="Cluster Commands",
+                     font=("Segoe UI", 14, "bold")).pack(pady=(0, 0))
 
         self._cmd_btns: List[ctk.CTkButton] = []
-
-        # Sort and group: JS safe, SQL safe, JS danger, SQL danger
         SORT_ORDER = {
             ("JS", "safe"): 0,
             ("SQL", "safe"): 1,
             ("JS", "danger"): 2,
             ("SQL", "danger"): 3,
         }
-        
-        for cmd in sorted(CLUSTER_COMMANDS, key=lambda c: SORT_ORDER.get((c.get("mode", "JS"), c.get("risk", "safe")), 99)):
+
+        for cmd in sorted(
+            CLUSTER_COMMANDS,
+            key=lambda c: SORT_ORDER.get((c.get("mode", "JS"), c.get("risk", "safe")), 99),
+        ):
             mode = cmd.get("mode", "JS")
             risk = cmd.get("risk", "safe")
-        
-            # Color settings
             fg_color, hover_color = COLOR_MAP.get((mode, risk), ("#444", "#333"))
-        
-            # Button text with warning if needed
             button_text = f"⚠️ {cmd['title']}" if risk == "danger" else cmd["title"]
-        
-            # Create the button
+
             btn = ctk.CTkButton(
                 self.cmd_grp_scroll,
                 text=button_text,
@@ -461,46 +546,41 @@ class ClusterGUI(ctk.CTkFrame):
             btn.pack(pady=8, anchor="center")
             self._cmd_btns.append(btn)
 
-
-
-        # --- terminal output box --------------------------
-        self.output_box = ctk.CTkTextbox(self, width=980, height=460, font=("Consolas", 12))
-        self.output_box.place(x=10, y=350)
+        # ─── terminal output ────────────────────────────────────────────
+        self.output_box = ctk.CTkTextbox(self, font=("Consolas", 12))
+        self.output_box.grid(
+            row=2, column=0, columnspan=2, sticky="nsew", padx=10, pady=(0, 10)
+        )
         self.output_box.configure(state="disabled", fg_color="black", text_color="lime")
 
-        # start first refresh
-        self.refresh_cluster()
-        self._poll_output()
-
-        # -- layout adjustments --
-        # Center command buttons in the Cluster Commands box
-        for widget in self.cmd_grp_scroll.winfo_children():
-            widget.pack_forget()
-        ctk.CTkLabel(self.cmd_grp_scroll, text="Cluster Commands", font=("Segoe UI", 14, "bold")).pack(pady=(8, 8))
-        for btn in self._cmd_btns:
-            btn.pack(pady=8, anchor="center")
-
-        # --- custom input field and run button ---
+        # ─── custom input bar ───────────────────────────────────────────
         self.input_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.input_frame.place(x=10, y=815)
+        self.input_frame.grid(
+            row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10)
+        )
+        self.input_frame.grid_columnconfigure(1, weight=1)
 
         self.mode_var = ctk.StringVar(value="JS")
         self.mode_switch = ctk.CTkSegmentedButton(
-            self.input_frame,
-            values=["JS", "SQL"],
-            variable=self.mode_var,
-            width=120
+            self.input_frame, values=["JS", "SQL"], variable=self.mode_var, width=120
         )
-        self.mode_switch.pack(side="left", padx=(0, 10))
+        self.mode_switch.grid(row=0, column=0, sticky="w", padx=(0, 10))
 
-        
-        # Adjusted width to make space for radio buttons
-        self.custom_input = ctk.CTkEntry(self.input_frame, width=750, placeholder_text="Enter custom JS/SQL command here...")
-        self.custom_input.pack(side="left", padx=(0, 10))
+        self.custom_input = ctk.CTkEntry(
+            self.input_frame,
+            placeholder_text="Enter custom JS/SQL command here...",
+        )
+        self.custom_input.grid(row=0, column=1, sticky="ew", padx=(0, 10))
         self.custom_input.bind("<Return>", lambda event: self._run_custom_js())
-        
-        self.run_custom_btn = ctk.CTkButton(self.input_frame, text="Run", command=self._run_custom_js)
-        self.run_custom_btn.pack(side="left")
+
+        self.run_custom_btn = ctk.CTkButton(
+            self.input_frame, text="Run", command=self._run_custom_js
+        )
+        self.run_custom_btn.grid(row=0, column=2, sticky="e")
+
+        # initial refresh + log polling
+        self.refresh_cluster()
+        self._poll_output()
 
     
 
@@ -532,6 +612,17 @@ class ClusterGUI(ctk.CTkFrame):
 
 
     def _load_cluster_status(self, silent: bool = False):
+        try:
+            raw = get_cluster_status(self.mysql_uri)
+        except RuntimeError as err:
+            # Could not talk to mysqlsh  →  log + visual clue
+            self.log(f"[ERROR] {err}")
+            self.after(0, lambda: self.summary_lbl.configure(
+                text="Cluster: N/A  |  Status: connection error"))
+            self.after(0, lambda: self.led_mgr.set(
+                self.status_led_lbl, "redLED.png", blink=False))
+            return
+        
         if not silent:
             self.log("Getting cluster status using URI:")
 
@@ -637,18 +728,22 @@ class ClusterGUI(ctk.CTkFrame):
 
             
 
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
     def _update_selected_node_led(self):
         selected = self.node_var.get()
         for node, led_widget in self.node_leds.items():
+            status  = self._node_status_map[node]["status"]
+            role    = self._node_status_map[node]["memberRole"]
+            color   = get_led_color(status, role)
+            base_fn = f"{color}LED.png"
+
             if node == selected:
-                self.led_mgr.set(led_widget, "blueLED.png", blink=True)
+                # Blink between the node’s own colour and blue
+                self.led_mgr.blink_between(led_widget, base_fn, "blueLED.png")
             else:
-                # re-set it to its actual status color
-                status = self._node_status_map[node]["status"]
-                role = self._node_status_map[node]["memberRole"]
-                color = get_led_color(status, role)
-                self.led_mgr.set(led_widget, f"{color}LED.png", blink=False)
+                # Solid light in the node’s own colour
+                self.led_mgr.set(led_widget, base_fn, blink=False)
+
 
     # ------------------------------------------------------------------
     def _run_custom_js(self):
@@ -820,8 +915,9 @@ def main():
     # New main window for tabbed GUI
     app = ctk.CTk()
     app.geometry("1020x915")
+    center_window(app, 1020, 915)
     app.title("ClusterDuck")
-
+    
     # Try to load icon if available
     icon_path = IMG / "icon.ico"
     if icon_path.exists():
@@ -830,13 +926,25 @@ def main():
         except Exception:
             pass
 
-    # Get cluster nodes
-    cluster_status_json = get_cluster_status(uri)
-    try:
-        nodes = list(json.loads(cluster_status_json)['defaultReplicaSet']['topology'].keys())
-    except Exception as e:
-        messagebox.showerror("Cluster Error", f"Failed to get nodes:\n{e}")
-        return
+    # ─── attempt login / topology fetch ───────────────────────────────
+    while True:
+        try:
+            cluster_json = get_cluster_status(uri)
+            nodes = list(json.loads(cluster_json)
+                         ['defaultReplicaSet']['topology'].keys())
+            break                                   # ← success, exit loop
+        except (RuntimeError, json.JSONDecodeError) as err:
+            messagebox.showerror(
+                "Connect Error",
+                f"Could not connect or parse topology:\n\n{err}"
+            )
+            # show login dialog again
+            login = LoginDialog(root)
+            root.wait_window(login)
+            if not login.result:        # user cancelled
+                return
+            creds = login.result
+            uri = f"{creds['user']}:{creds['pass'].replace('@', '%40')}@{creds['host']}"
 
     tab_view = ctk.CTkTabview(app, width=1000, height=880)
     tab_view.pack(padx=10, pady=10, fill="both", expand=True)
